@@ -1,0 +1,11 @@
+**/__pycache__
+.archive
+.dataset
+.neptune
+.vscode
+.git
+.env
+.log
+wandb
+.dataset_old*
+.model_state

@@ -5,7 +5,7 @@ import os.path as osp
 import json
 
 class QM9CCDataset(tgdata.InMemoryDataset):
-    def __init__(self, root, subset, split, transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, root, split, transform=None, pre_transform=None, pre_filter=None):
         self.json_gzip_path = f".dataset_src/CC_{split}.json.gz"
         new_root = osp.join(root, split)
         super(QM9CCDataset, self).__init__(new_root, transform, pre_transform, pre_filter)

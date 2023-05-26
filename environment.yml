@@ -1,4 +1,4 @@
-name: year4
+name: plane
 channels:
   - pyg
   - pytorch

@@ -51,7 +51,8 @@ class ModelGraph(nn.Module):
 
             hist.append(h_g)
         
-        # Aggregation
+        # Aggregate all node features from i-th layer to obtain a graph-level feature
+        # Concat then MLP 
         out = self.out_final(torch.cat([
             self.aggr(h_cur, data.batch, dim_size=num_batch)
             for h_cur in hist

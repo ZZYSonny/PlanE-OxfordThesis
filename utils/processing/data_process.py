@@ -13,6 +13,7 @@ SPQR_TYPE_DICT = {
 }
 
 class Data(tgdata.Data):
+    '''Definition of the data class for the PlanE'''
     def __init__(self, **kwargs):
         super(Data, self).__init__(**kwargs)
 
@@ -39,9 +40,6 @@ class Data(tgdata.Data):
             case 'bc_edge_index':       return [[num_b_nodes], [num_g_nodes]]
             case 'cb_edge_index':       return [[num_g_nodes], [num_b_nodes]]
 
-            case 'pr_read_from_b':      return [[num_b_nodes], [1]]
-            case 'pr_read_from_c':      return [[num_g_nodes], [1]]
-
             case _: return 0
     
     def __cat_dim__(self, key, value, *args, **kwargs):
@@ -50,8 +48,11 @@ class Data(tgdata.Data):
         else:
             return super().__cat_dim__(key, value, *args, **kwargs)
 
-def process(data: tgdata.Data, pwl_iter:int=4):
+def process(data: tgdata.Data, pwl_iter:int=4, directional_tree=True):
     def discrete(xs):
+        '''Discretize the input list of values into a list of integers
+            out[i]=out[j] iif xs[i]=xs[j]
+        '''
         unique_xs = [x for i,x in enumerate(xs) if x not in xs[:i]]
         sorted_unique_xs = sorted(unique_xs)
         return [sorted_unique_xs.index(x) for x in xs]
@@ -71,22 +72,33 @@ def process(data: tgdata.Data, pwl_iter:int=4):
         for v in [data.edge_index[1,i].item()]
     }
 
+    # [b, g]: Input Graph Node g is in the biconnected component reprsented by BC Tree Node b
     g_read_from_b = []
+    # [s, g]: Input Graph Node g is in the triconnected component reprsented by SPQR Tree Node s
     g_read_from_spqr = []
     def add_graph(g: sageall.Graph):
         for cc_nodes in g.connected_components():
             cc = g.subgraph(cc_nodes)
             add_cc(cc)
 
+    # B Node i in the BC Tree should be updated in the b_order[i] iterations
     b_order = []
+    # Input Graph Node i should be updated in the c_order[i] iterations
+    # If i is not a cut node, c_order[i]=-1
     c_order = [-1] * data.num_nodes
+    # [b, c]: BC Tree B Node b -> the SPQR Tree C Node c
     bc_edge_index = []
+    # [c, b]: SPQR Tree C Node c -> the BC Tree B Node b
     cb_edge_index = []
-    pr_read_from_b = []
-    pr_read_from_c = []
-
+    
+    # Number of SPQR Tree B Nodes
     b_num_nodes = 0
+    # [s, b]: The triconnected component represented by SPQR Tree B Node s
+    # is in the biconnected component represented by the BC Tree B Node b
     b_read_from_spqr = []
+    # [s, b]: The triconnected component represented by SPQR Tree B Node s
+    # is in the biconnected component represented by the BC Tree B Node b
+    # and is the root of the SPQR tree
     b_read_from_spqr_root = []
     def add_cc(g: sageall.Graph):
         nonlocal b_num_nodes
@@ -107,46 +119,50 @@ def process(data: tgdata.Data, pwl_iter:int=4):
                     b_id = b_num_nodes
                     node_map[node_tuple] = b_id
                     b_num_nodes += 1
-
+                    # Add the computation order of the B Node b_id
                     b_order.append((max_depth - node_depth[node_tuple]) //2 )
-
+                    # Get the SPQR Tree and the BCC Code from the classical algorithm
                     (spqr_tree, spqr_center, bcc_code) = bcc_tree_and_code[node_tuple[1]]
+                    # Add the biconnected component and get the mapping from SPQR Tree Nodes to spqr id
                     b_node_map = add_bcc(spqr_tree, spqr_center, bcc_code)
-
+                    # Construct read_froms
                     b_read_from_spqr_root.append([b_node_map[spqr_center], b_id])
                     for i in b_node_map.values():
                         b_read_from_spqr.append([i, b_id])
                     for i in node_tuple[1]:
                         g_read_from_b.append([b_id, i])
                 case 'C':
+                    # Add the computation order
                     c_order[node_tuple[1]] = (max_depth - node_depth[node_tuple]) //2
         
+        # BC Tree edges
         for uu,vv, _ in tree.edge_iterator():
-            if node_depth[uu] < node_depth[vv]:
-                # vv -> uu
-                u, v = vv, uu
-            else:
-                # uu -> vv
-                u, v = uu, vv
+            for u,v in [(uu,vv), (vv,uu)]:
+                if directional_tree and node_depth[u] < node_depth[v]:
+                    continue
 
-            if u[0] == 'B' and v[0] == 'C':
-                # b -> c
-                bc_edge_index.append([node_map[u], v[1]])
-            else:
-                # c -> b
-                cb_edge_index.append([u[1], node_map[v]])
-        
-        if center[0] == 'B':
-            pr_read_from_b.append([node_map[center], 0])
-        else:
-            pr_read_from_c.append([center[1], 0])
+                if u[0] == 'B' and v[0] == 'C':
+                    # b -> c
+                    bc_edge_index.append([node_map[u], v[1]])
+                else:
+                    # c -> b
+                    cb_edge_index.append([u[1], node_map[v]])
 
-
+    # Number of SPQR Tree Nodes
     spqr_num_nodes = 0
+    # SPQR Tree Node i should be updated in the spqr_order[i] iterations
     spqr_order = []
+    # SPQR Tree Node i has type spqr_type[i]
     spqr_type = []
+    # [s1,s2]: SPQR Tree Node s1 -> SPQR Tree Node s2
     spqr_edge_index = []
+    # Attribute of spqr_edge_index
     spqr_edge_attr = []
+    # [spqr_id, u, v, attr, i, kappa]
+    # Describes the edge (u,v) in the triconnected component
+    # represented by SPQR Tree Node spqr_id
+    # The edge has index i in the canonical cycle of the triconnected component
+    # and u has canonical code kappa
     spqr_read_from_e = []
 
     def add_bcc(tree: sageall.Graph, center, code):
@@ -157,7 +173,7 @@ def process(data: tgdata.Data, pwl_iter:int=4):
             node_map[node] = spqr_num_nodes
             spqr_num_nodes += 1
             spqr_type.append(SPQR_TYPE_DICT[node[0]])
-        
+        # Find depth of each SPQR node
         node_depth = {
             node_map[node]: len(path)
             for node, path in tree.shortest_paths(center).items()
@@ -167,15 +183,15 @@ def process(data: tgdata.Data, pwl_iter:int=4):
             max_depth - node_depth[i]
             for i in sorted(node_depth.keys())
         ])
-        
         cycle = code.get_cycles()
         for (u,v) in reversed(list(tree.breadth_first_search(center, edges=True))):
             (spqr_cycle_u, spqr_code_u) = cycle[u]
             (spqr_cycle_v, spqr_code_v) = cycle[v]
 
+            if not directional_tree:
             # u->v
-            # spqr_edge_index.append([node_map[u], node_map[v]])
-            # spqr_edge_attr.append(0)
+                spqr_edge_index.append([node_map[u], node_map[v]])
+                spqr_edge_attr.append(0)
 
             # v->u
             spqr_edge_index.append([node_map[v], node_map[u]])
@@ -232,8 +248,6 @@ def process(data: tgdata.Data, pwl_iter:int=4):
         c_order = torch.tensor(c_order, dtype=torch.long),
         bc_edge_index = torch.tensor(bc_edge_index, dtype=torch.long).view(-1,2).mT,
         cb_edge_index = torch.tensor(cb_edge_index, dtype=torch.long).view(-1,2).mT,
-        pr_read_from_b = torch.tensor(pr_read_from_b, dtype=torch.long).view(-1,2).mT,
-        pr_read_from_c = torch.tensor(pr_read_from_c, dtype=torch.long).view(-1,2).mT,
     )
 
 

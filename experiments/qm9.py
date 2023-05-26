@@ -76,7 +76,7 @@ def find_metric(model_out: torch.Tensor, dataset_y: torch.Tensor):
 def get_dataset():
     root = ".dataset/QM9"
     transorm = tgtrans.Compose([
-        data_process.process,
+        lambda x: data_process.process(x, directional_tree=False),
     ])
     train = QM9Dataset(root=root, split="train", pre_transform=transorm)
     valid = QM9Dataset(root=root, split="valid", pre_transform=transorm)

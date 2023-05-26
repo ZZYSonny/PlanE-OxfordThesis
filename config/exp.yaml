@@ -3,7 +3,7 @@ program: experiments.exp
 method: grid
 parameters:
   dim_hidden:
-    values: [48]
+    values: [64]
   dim_plane_pe:
     values: [16]
   num_layers:

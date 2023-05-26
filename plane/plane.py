@@ -17,17 +17,33 @@ class TriEncoder(nn.Module):
         self.bn_out = nn.BatchNorm1d(config.dim)
 
     def forward(self, data, h_g, h_e):
+        # Number of triconnected components
         n_spqr = data.spqr_batch.size(0)
 
+        # Edges in all triconnected components, for each edge, we have
+        #   id_spqr: which triconnected component the edge belongs to
+        #   id_u: the source node of the edge
+        #   id_v: the target node of the edge
+        #   id_e: If <0, the edge is a virtual edge
+        #         if >=0,the edge is a real edge 
+        #           and id_e is the index of the edge feature
+        #   code1: the index of the edge in the canonical walk
+        #   code2: \kappa[code1]
         [id_spqr, id_u, id_v, id_e, code1, code2] = data.spqr_read_from_e
+        # Initialize the edge feature
         h_cycle_edge = torch.zeros((id_e.size(0), self.config.dim), device=h_g.device)
+        # For virtual edges, we use the learnable virtual edge feature
         virtual_mask = (id_e < 0)
         h_cycle_edge[virtual_mask] = self.h_virtual
         if h_e is None:
+            # If no edge feature is provided, we use the learnable edge feature
+            # As we want to distinguish virtual edges and real edges
             h_cycle_edge[~virtual_mask] = self.h_edge
         else:
+            # Read the edge feature
             h_cycle_edge[~virtual_mask] = h_e[id_e[~virtual_mask]]
 
+        # Construct the tuple and perform the first MLP (to mix the channels)
         pre_agg = self.lin_node(torch.cat([
             h_g[id_u],
             h_cycle_edge,
@@ -35,6 +51,7 @@ class TriEncoder(nn.Module):
             self.pe(code2)
         ],dim=1))
 
+        # Aggregate in terms of triconnected components
         pre_mlp = torch_scatter.scatter(
             pre_agg,
             id_spqr,
@@ -43,10 +60,13 @@ class TriEncoder(nn.Module):
             reduce="add"
         )
 
+        # Apply a different MLP for each type of triconnected components
         out = torch.zeros((n_spqr, self.config.dim), device=data.x.device)
         for i in range(3):
             mask = data.spqr_type==i
             out[mask] = self.mlp_out[i](pre_mlp[mask])
+
+        # Perform batch normalization on all triconnected components representations
         out = self.bn_out(out)
 
         return out
@@ -73,18 +93,26 @@ class BiRecEncoder(nn.Module):
 
     def forward(self, data, h_spqr):
         h_spqr = h_spqr.clone()
+        # Embed \theta into positional encoding vectors
         h_spqr_edge = self.pe(data.spqr_edge_attr)
         for cur_order in range(max(data.spqr_order)+1):
+            # At the first iteration, we update node with no children
+            # At the second iteration, we update node whose children are updated at the first iteration etc
+            # The node is recognized by data.spqr_order
             node_mask = data.spqr_order==cur_order
+            # Edges connecting the node to its children
             edge_mask = node_mask[data.spqr_edge_index[1]]
             h_new_spqr = self.update(
                 h_spqr.clone(),
                 edge_index=data.spqr_edge_index[:, edge_mask],
                 edge_attr=h_spqr_edge[edge_mask]
             )[node_mask]
+            # Write back
             h_new_spqr = self.mlp_after_update(h_new_spqr)
             h_spqr[node_mask] = h_new_spqr
         
+        # Obtain a representation for each biconnected component
+        # By reading from the canonical center of the SPQR tree
         h_b = self.read(
             (h_spqr,torch.zeros((data.b_batch.size(0), self.config.dim), device=data.x.device)),
             data.b_read_from_spqr_root,
@@ -98,6 +126,7 @@ class CnearBEncoder(nn.Module):
         self.mp = tgnn.GINConv(MLP(config.dim, config.dim, drop=config.drop_enc, factor=config.flags_mlp_factor))
     
     def forward(self, data, h_g, h_b):
+        # A cut encoder that simply perform a few rounds of message passing
         return self.mp(
             (h_b, h_g),
             data.bc_edge_index
@@ -121,6 +150,9 @@ class CRecSubEncoder(nn.Module):
         h_g = h_g.clone()
         h_b = h_b.clone()
         for cur_order in range(max_order+1):
+            # Mostly the same logic as BiRecEncoder
+            # Except that we have two types of nodes
+            # We first deal with biconnected components (B nodes) and then cut nodes (C nodes)
             b_node_mask = data.b_order==cur_order
             cb_edge_mask = b_node_mask[data.cb_edge_index[1]]
             h_b = self.update(
@@ -206,19 +238,24 @@ class PlaneLayer(nn.Module):
         aggs = []
 
         if self.flag_aggr_neigh:
+            # Aggregate from neighbors
             if h_e is not None:
+                # If edge features are present
                 aggs.append(self.aggr_neigh(
                     (h_g, h_g),
                     edge_index=data.edge_index,
                     edge_attr=h_e
                 ))
             else:
+                # No edge features
                 aggs.append(self.aggr_neigh(
                     h_g,
                     edge_index=data.edge_index,
                 ))
         
         if self.flag_aggr_global_readout:
+            # Compute the global readout for each graph
+            # Aggregate from the global readout
             h_gr = self.encoder_gr(
                 h_g,
                 data.batch,
@@ -227,24 +264,30 @@ class PlaneLayer(nn.Module):
             aggs.append(h_gr[data.batch])
 
         if self.flag_compute_spqr:
+            # Compute (SPQR) components features
             h_spqr = self.encoder_spqr(data, h_g, h_e)
             if self.flag_aggr_spqr:
+                # Aggregate from SPQR components
                 aggs.append(self.aggr_spqr(
                     (h_spqr,h_g),
                     edge_index=data.g_read_from_spqr,
                 ))
 
             if self.flag_compute_b:
+                # Compute biconnected component features
                 h_b = self.encoder_b(data, h_spqr)
                 if self.flag_aggr_b:
+                    # Aggregate from biconnected components
                     aggs.append(self.aggr_b(
                         (h_b,h_g),
                         edge_index=data.g_read_from_b,
                     ))
             
                 if self.flag_compute_planar_readout:
+                    # Compute cut readout
                     h_pr = self.encoder_pr(data, h_g, h_b)
                     if self.flag_aggr_planar_readout:
+                        # Aggregate from cut readout
                         aggs.append(h_pr)
 
         h_new_g = self.mlp_out(torch.cat(aggs, dim=1))
